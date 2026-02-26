@@ -31,7 +31,11 @@ impl CollectionRemove for Collection<Field> {
     type Key = Field;
 
     fn remove_known(&mut self, key: &Field) {
-        self.known.remove(key);
+        if !self.known().contains_key(key) {
+            return;
+        }
+
+        self.known_mut().remove(key);
     }
 }
 

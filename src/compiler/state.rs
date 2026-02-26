@@ -1,6 +1,7 @@
 use crate::path::PathPrefix;
 use crate::value::{Kind, Value};
 use std::collections::{HashMap, hash_map::Entry};
+use std::sync::Arc;
 
 use super::{TypeDef, parser::ast::Ident, type_def::Details, value::Collection};
 
@@ -52,9 +53,20 @@ impl TypeState {
 }
 
 /// Local environment, limited to a given scope.
-#[derive(Debug, Default, Clone, PartialEq)]
+///
+/// The bindings map is wrapped in `Arc` so that `Clone` is O(1).
+/// Mutations go through `Arc::make_mut` (copy-on-write).
+#[derive(Debug, Clone, PartialEq)]
 pub struct LocalEnv {
-    pub(crate) bindings: HashMap<Ident, Details>,
+    bindings: Arc<HashMap<Ident, Details>>,
+}
+
+impl Default for LocalEnv {
+    fn default() -> Self {
+        Self {
+            bindings: Arc::new(HashMap::new()),
+        }
+    }
 }
 
 impl LocalEnv {
@@ -67,21 +79,26 @@ impl LocalEnv {
     }
 
     pub(crate) fn insert_variable(&mut self, ident: Ident, details: Details) {
-        self.bindings.insert(ident, details);
+        Arc::make_mut(&mut self.bindings).insert(ident, details);
     }
 
     pub(crate) fn remove_variable(&mut self, ident: &Ident) -> Option<Details> {
-        self.bindings.remove(ident)
+        if !self.bindings.contains_key(ident) {
+            return None;
+        }
+
+        Arc::make_mut(&mut self.bindings).remove(ident)
     }
 
     /// Any state the child scope modified that was part of the parent is copied to the parent scope
     pub(crate) fn apply_child_scope(mut self, child: Self) -> Self {
-        for (ident, child_details) in child.bindings {
-            if let Some(self_details) = self.bindings.get_mut(&ident) {
+        let child_bindings = Arc::try_unwrap(child.bindings).unwrap_or_else(|arc| (*arc).clone());
+        let self_bindings = Arc::make_mut(&mut self.bindings);
+        for (ident, child_details) in child_bindings {
+            if let Some(self_details) = self_bindings.get_mut(&ident) {
                 *self_details = child_details;
             }
         }
-
         self
     }
 
@@ -89,11 +106,13 @@ impl LocalEnv {
     /// where different `LocalEnv`'s can be created, and the result is decided at runtime.
     /// The compile-time type must be the union of the options.
     pub(crate) fn merge(mut self, other: Self) -> Self {
-        for (ident, other_details) in other.bindings {
-            if let Some(self_details) = self.bindings.get_mut(&ident) {
+        let other_bindings = Arc::try_unwrap(other.bindings).unwrap_or_else(|arc| (*arc).clone());
+        let self_bindings = Arc::make_mut(&mut self.bindings);
+        for (ident, other_details) in other_bindings {
+            if let Some(self_details) = self_bindings.get_mut(&ident) {
                 *self_details = self_details.clone().merge(other_details);
             } else {
-                self.bindings.insert(ident, other_details);
+                self_bindings.insert(ident, other_details);
             }
         }
         self
@@ -213,5 +232,59 @@ impl RuntimeState {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::parser::ast::Ident;
+    use crate::compiler::type_def::Details;
+
+    #[test]
+    fn local_env_clone_is_copy_on_write() {
+        let ident = Ident::new("foo");
+
+        let mut original = LocalEnv::default();
+        original.insert_variable(
+            ident.clone(),
+            Details {
+                type_def: TypeDef::bytes(),
+                value: None,
+            },
+        );
+
+        let mut cloned = original.clone();
+        cloned.insert_variable(
+            Ident::new("bar"),
+            Details {
+                type_def: TypeDef::integer(),
+                value: None,
+            },
+        );
+
+        assert!(original.variable(&Ident::new("bar")).is_none());
+        assert!(cloned.variable(&ident).is_some());
+        assert!(cloned.variable(&Ident::new("bar")).is_some());
+    }
+
+    #[test]
+    fn local_env_remove_missing_key_keeps_shared_backing_map() {
+        let mut original = LocalEnv::default();
+        original.insert_variable(
+            Ident::new("foo"),
+            Details {
+                type_def: TypeDef::bytes(),
+                value: None,
+            },
+        );
+
+        let mut cloned = original.clone();
+        let missing = Ident::new("missing");
+        assert!(cloned.remove_variable(&missing).is_none());
+
+        assert!(Arc::ptr_eq(&original.bindings, &cloned.bindings));
+        assert!(original.variable(&Ident::new("foo")).is_some());
+        assert!(cloned.variable(&Ident::new("foo")).is_some());
     }
 }

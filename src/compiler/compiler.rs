@@ -706,7 +706,6 @@ impl<'a> Compiler<'a> {
         //    have resolved, but this will break many functions relying on calling `type_def`
         //    on it's own args.
         // see: https://github.com/vectordotdev/vector/issues/13752
-        let state_before_function = original_state.clone();
 
         // First, we create a new function-call builder to validate the
         // expression.
@@ -716,7 +715,7 @@ impl<'a> Compiler<'a> {
             abort_on_error,
             arguments,
             self.fns,
-            &state_before_function,
+            &original_state,
             state,
             closure_variables,
         )
@@ -740,7 +739,7 @@ impl<'a> Compiler<'a> {
 
             builder
                 .compile(
-                    &state_before_function,
+                    &original_state,
                     state,
                     block,
                     local_snapshot,

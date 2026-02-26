@@ -1,5 +1,6 @@
 use crate::path::OwnedValuePath;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use super::Collection;
 use crate::value::Kind;
@@ -346,7 +347,7 @@ impl From<Infinite> for Kind {
 impl<T: Ord> From<Infinite> for Collection<T> {
     fn from(infinite: Infinite) -> Self {
         Self {
-            known: BTreeMap::default(),
+            known: Arc::new(BTreeMap::default()),
             unknown: Unknown::infinite(infinite),
         }
     }

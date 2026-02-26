@@ -5,6 +5,7 @@ mod index;
 mod unknown;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::path::OwnedSegment;
 use crate::path::OwnedValuePath;
@@ -22,9 +23,13 @@ pub trait CollectionKey {
 ///
 /// A collection contains one or more kinds for known positions within the collection (e.g. indices
 /// or fields), and contains a global "unknown" state that applies to all unknown paths.
+///
+/// The `known` map is wrapped in `Arc` so that `Clone` is O(1) via reference
+/// counting. Mutations go through `Arc::make_mut` (copy-on-write), keeping
+/// the shared-nothing semantics the rest of the codebase expects.
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd)]
 pub struct Collection<T: Ord> {
-    known: BTreeMap<T, Kind>,
+    known: Arc<BTreeMap<T, Kind>>,
 
     /// The kind of other unknown fields.
     ///
@@ -39,7 +44,7 @@ impl<T: Ord + Clone> Collection<T> {
     #[must_use]
     pub fn from_parts(known: BTreeMap<T, Kind>, unknown: impl Into<Kind>) -> Self {
         Self {
-            known,
+            known: Arc::new(known),
             unknown: unknown.into().into(),
         }
     }
@@ -60,7 +65,7 @@ impl<T: Ord + Clone> Collection<T> {
     #[must_use]
     pub fn from_unknown(unknown: impl Into<Kind>) -> Self {
         Self {
-            known: BTreeMap::default(),
+            known: Arc::new(BTreeMap::default()),
             unknown: unknown.into().into(),
         }
     }
@@ -69,7 +74,7 @@ impl<T: Ord + Clone> Collection<T> {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            known: BTreeMap::default(),
+            known: Arc::new(BTreeMap::default()),
             unknown: Kind::undefined().into(),
         }
     }
@@ -78,7 +83,7 @@ impl<T: Ord + Clone> Collection<T> {
     #[must_use]
     pub fn any() -> Self {
         Self {
-            known: BTreeMap::default(),
+            known: Arc::new(BTreeMap::default()),
             unknown: Unknown::any(),
         }
     }
@@ -87,7 +92,7 @@ impl<T: Ord + Clone> Collection<T> {
     #[must_use]
     pub fn json() -> Self {
         Self {
-            known: BTreeMap::default(),
+            known: Arc::new(BTreeMap::default()),
             unknown: Unknown::json(),
         }
     }
@@ -107,9 +112,11 @@ impl<T: Ord + Clone> Collection<T> {
     }
 
     /// Get a mutable reference to the "known" elements in the collection.
+    /// Uses copy-on-write: if other clones share this map, a deep copy is
+    /// made on first mutation, otherwise the existing allocation is reused.
     #[must_use]
     pub fn known_mut(&mut self) -> &mut BTreeMap<T, Kind> {
-        &mut self.known
+        Arc::make_mut(&mut self.known)
     }
 
     /// Gets the type of "unknown" elements in the collection.
@@ -172,8 +179,8 @@ impl<T: Ord + Clone> Collection<T> {
     /// has an object with a field "bar" results in a collection of which any field can have an
     /// object that has a field "bar".
     pub fn anonymize(&mut self) {
-        let known_unknown = self
-            .known
+        let known = Arc::make_mut(&mut self.known);
+        let known_unknown = known
             .values_mut()
             .reduce(|lhs, rhs| {
                 lhs.merge_keep(rhs.clone(), false);
@@ -182,7 +189,7 @@ impl<T: Ord + Clone> Collection<T> {
             .cloned()
             .unwrap_or(Kind::never());
 
-        self.known.clear();
+        known.clear();
         self.unknown = self.unknown.to_kind().union(known_unknown).into();
     }
 
@@ -201,44 +208,45 @@ impl<T: Ord + Clone> Collection<T> {
     /// For *unknown fields or indices*:
     ///
     /// - Both `Unknown`s are merged, similar to merging two `Kind`s.
-    pub fn merge(&mut self, mut other: Self, overwrite: bool) {
-        for (key, self_kind) in &mut self.known {
-            if let Some(other_kind) = other.known.remove(key) {
+    pub fn merge(&mut self, other: Self, overwrite: bool) {
+        let other_unknown_kind = other.unknown_kind();
+        let mut other_known = Arc::try_unwrap(other.known).unwrap_or_else(|arc| (*arc).clone());
+
+        let self_known = Arc::make_mut(&mut self.known);
+        for (key, self_kind) in self_known.iter_mut() {
+            if let Some(other_kind) = other_known.remove(key) {
                 if overwrite {
                     *self_kind = other_kind;
                 } else {
                     self_kind.merge_keep(other_kind, overwrite);
                 }
-            } else if other.unknown_kind().contains_any_defined() {
+            } else if other_unknown_kind.contains_any_defined() {
                 if overwrite {
-                    // the specific field being merged isn't guaranteed to exist, so merge it with the known type of self
-                    *self_kind = other
-                        .unknown_kind()
+                    *self_kind = other_unknown_kind
                         .without_undefined()
                         .union(self_kind.clone());
                 } else {
-                    self_kind.merge_keep(other.unknown_kind(), overwrite);
+                    self_kind.merge_keep(other_unknown_kind.clone(), overwrite);
                 }
             } else if !overwrite {
-                // other is missing this field, which returns null
                 self_kind.add_undefined();
             }
         }
 
         let self_unknown_kind = self.unknown_kind();
+        let self_known = Arc::make_mut(&mut self.known);
         if self_unknown_kind.contains_any_defined() {
-            for (key, mut other_kind) in other.known {
+            for (key, mut other_kind) in other_known {
                 if !overwrite {
                     other_kind.merge_keep(self_unknown_kind.clone(), overwrite);
                 }
-                self.known_mut().insert(key, other_kind);
+                self_known.insert(key, other_kind);
             }
         } else if overwrite {
-            self.known.extend(other.known);
+            self_known.extend(other_known);
         } else {
-            for (key, other_kind) in other.known {
-                // self is missing this field, which returns null
-                self.known.insert(key, other_kind.or_undefined());
+            for (key, other_kind) in other_known {
+                self_known.insert(key, other_kind.or_undefined());
             }
         }
         self.unknown.merge(other.unknown, overwrite);
@@ -281,7 +289,7 @@ impl<T: Ord + Clone + CollectionKey> Collection<T> {
 
         // All known fields in `other` need to either be a subset of a matching known field in
         // `self`, or a subset of self's `unknown` type state.
-        for (key, other_kind) in &other.known {
+        for (key, other_kind) in other.known.iter() {
             match self.known.get(key) {
                 Some(self_kind) => {
                     self_kind
@@ -298,7 +306,7 @@ impl<T: Ord + Clone + CollectionKey> Collection<T> {
 
         // All known fields in `self` not known in `other` need to be a superset of other's
         // `unknown` type state.
-        for (key, self_kind) in &self.known {
+        for (key, self_kind) in self.known.iter() {
             if !other.known.contains_key(key) {
                 self_kind
                     .is_superset(&other.unknown_kind())
@@ -332,7 +340,7 @@ pub enum EmptyState {
 impl<T: Ord> From<BTreeMap<T, Kind>> for Collection<T> {
     fn from(known: BTreeMap<T, Kind>) -> Self {
         Self {
-            known,
+            known: Arc::new(known),
             unknown: Kind::undefined().into(),
         }
     }
@@ -951,5 +959,30 @@ mod tests {
         ]) {
             assert_eq!(this.reduced_kind(), want, "{title}");
         }
+    }
+
+    #[test]
+    fn test_known_map_clone_is_copy_on_write() {
+        let original = Collection::from(BTreeMap::from([("foo", Kind::bytes())]));
+        let mut cloned = original.clone();
+
+        cloned.known_mut().insert("bar", Kind::integer());
+
+        assert!(original.known().contains_key("foo"));
+        assert!(!original.known().contains_key("bar"));
+        assert!(cloned.known().contains_key("foo"));
+        assert!(cloned.known().contains_key("bar"));
+    }
+
+    #[test]
+    fn test_known_map_remove_missing_key_keeps_shared_backing_map() {
+        let original: Collection<Field> = Collection::from(BTreeMap::from([(Field::from("foo"), Kind::bytes())]));
+        let mut cloned = original.clone();
+
+        cloned.remove_known(&Field::from("missing"));
+
+        assert!(Arc::ptr_eq(&original.known, &cloned.known));
+        assert!(original.known().contains_key(&Field::from("foo")));
+        assert!(cloned.known().contains_key(&Field::from("foo")));
     }
 }

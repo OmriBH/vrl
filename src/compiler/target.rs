@@ -566,6 +566,6 @@ mod tests {
         );
 
         let merged = a.merge(b);
-        assert_eq!(merged.bindings.len(), 2);
+        assert_eq!(merged.variable_idents().count(), 2);
     }
 }
