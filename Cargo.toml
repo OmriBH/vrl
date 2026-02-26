@@ -288,3 +288,8 @@ harness = false
 name = "stdlib"
 harness = false
 required-features = ["default", "test"]
+
+[[bench]]
+name = "compiler_typestate"
+harness = false
+required-features = ["default", "test"]
