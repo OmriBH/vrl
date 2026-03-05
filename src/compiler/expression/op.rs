@@ -156,7 +156,8 @@ impl Expression for Op {
         // if the RHS will be resolved, this should not be used
         let maybe_rhs = |state: &mut TypeState| {
             let rhs_info = self.rhs.type_info(state);
-            *state = state.clone().merge(rhs_info.state);
+            let current = std::mem::take(state);
+            *state = current.merge(rhs_info.state);
             rhs_info.result
         };
 

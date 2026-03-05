@@ -92,11 +92,19 @@ impl LocalEnv {
 
     /// Any state the child scope modified that was part of the parent is copied to the parent scope
     pub(crate) fn apply_child_scope(mut self, child: Self) -> Self {
-        let child_bindings = Arc::try_unwrap(child.bindings).unwrap_or_else(|arc| (*arc).clone());
+        if self.bindings.is_empty()
+            || child.bindings.is_empty()
+            || Arc::ptr_eq(&self.bindings, &child.bindings)
+        {
+            return self;
+        }
+
         let self_bindings = Arc::make_mut(&mut self.bindings);
-        for (ident, child_details) in child_bindings {
+        for (ident, child_details) in child.bindings.iter() {
             if let Some(self_details) = self_bindings.get_mut(&ident) {
-                *self_details = child_details;
+                if self_details != child_details {
+                    *self_details = child_details.clone();
+                }
             }
         }
         self
@@ -106,11 +114,18 @@ impl LocalEnv {
     /// where different `LocalEnv`'s can be created, and the result is decided at runtime.
     /// The compile-time type must be the union of the options.
     pub(crate) fn merge(mut self, other: Self) -> Self {
+        if other.bindings.is_empty() || Arc::ptr_eq(&self.bindings, &other.bindings) {
+            return self;
+        }
+        if self.bindings.is_empty() {
+            return other;
+        }
+
         let other_bindings = Arc::try_unwrap(other.bindings).unwrap_or_else(|arc| (*arc).clone());
         let self_bindings = Arc::make_mut(&mut self.bindings);
         for (ident, other_details) in other_bindings {
             if let Some(self_details) = self_bindings.get_mut(&ident) {
-                *self_details = self_details.clone().merge(other_details);
+                self_details.merge_in_place(other_details);
             } else {
                 self_bindings.insert(ident, other_details);
             }
@@ -140,11 +155,10 @@ impl Default for ExternalEnv {
 
 impl ExternalEnv {
     #[must_use]
-    pub fn merge(self, other: Self) -> Self {
-        Self {
-            target: self.target.merge(other.target),
-            metadata: self.metadata.union(other.metadata),
-        }
+    pub fn merge(mut self, other: Self) -> Self {
+        self.target.merge_in_place(other.target);
+        self.metadata = self.metadata.union(other.metadata);
+        self
     }
 
     /// Creates a new external environment that starts with an initial given

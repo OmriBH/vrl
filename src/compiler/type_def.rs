@@ -544,15 +544,12 @@ pub(crate) struct Details {
 }
 
 impl Details {
-    /// Returns the union of 2 possible states
-    pub(crate) fn merge(self, other: Self) -> Self {
-        Self {
-            type_def: self.type_def.union(other.type_def),
-            value: if self.value == other.value {
-                self.value
-            } else {
-                None
-            },
+    /// Merge `other` into `self` without cloning the full `Details` value.
+    pub(crate) fn merge_in_place(&mut self, other: Self) {
+        let current = std::mem::replace(&mut self.type_def, TypeDef::never());
+        self.type_def = current.union(other.type_def);
+        if self.value != other.value {
+            self.value = None;
         }
     }
 }

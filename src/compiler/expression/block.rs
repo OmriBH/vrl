@@ -57,7 +57,9 @@ impl Expression for Block {
     }
 
     fn type_info(&self, state: &TypeState) -> TypeInfo {
-        let parent_locals = state.local.clone();
+        // Only capture parent locals when we actually need to apply child-scope
+        // semantics — inline blocks (`new_scope = false`) never use it.
+        let parent_locals = self.new_scope.then(|| state.local.clone());
 
         let mut state = state.clone();
         let mut result = TypeDef::null();
@@ -77,7 +79,7 @@ impl Expression for Block {
             returns.merge_keep(result.returns().clone(), false);
         }
 
-        if self.new_scope {
+        if let Some(parent_locals) = parent_locals {
             state.local = parent_locals.apply_child_scope(state.local);
         }
 
